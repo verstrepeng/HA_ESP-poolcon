@@ -1,0 +1,213 @@
+substitutions:
+  devicename: esp_zwembad
+  ip_addr: 192.168.4.79
+  
+esphome:
+  name: $devicename
+  platform: ESP8266
+  board: esp8285
+
+<<: !include common/wifi.yaml
+<<: !include common/api_ota.yaml
+
+# Disable serial logging to re-use Rx and Tx pins
+logger:
+  baud_rate: 0
+
+dallas:
+  - pin: GPIO2
+
+i2c:
+  #GPIO1 = TX
+  #GPIO3 = RX
+  sda: GPIO1
+  scl: GPIO3
+  scan: true
+  frequency: 700khz
+
+text_sensor:
+  - !include common/text_sensor/uptime.yaml
+  - platform: homeassistant
+    id: filter_mode
+    entity_id: input_select.zwembad_filtering
+
+binary_sensor:
+  - !include common/binary_sensor/status.yaml
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: True
+    name: ${devicename} button 1
+    internal: true
+    on_press:
+      - switch.toggle: relay1
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode: INPUT_PULLUP
+      inverted: True
+    name: ${devicename} button 2
+    internal: true
+    on_press:
+      - switch.toggle: relay2
+  - platform: gpio
+    pin:
+      number: GPIO10
+      mode: INPUT_PULLUP
+      inverted: True
+    name: ${devicename} button 3
+    internal: true
+    on_press:
+      - script.execute: solar_off
+  - platform: gpio
+    pin:
+      number: GPIO14
+      mode: INPUT_PULLUP
+      inverted: True
+    name: ${devicename} button 4
+    internal: true
+    on_press:
+      - script.execute: solar_on
+  - platform: homeassistant
+    name: warmtepomp
+    id: warmtepomp
+    entity_id: switch.esp_warmtepomp_relay
+    internal: true
+    on_state:
+      then:
+        - if:
+            condition:
+              - binary_sensor.is_on: warmtepomp
+            then:
+              - switch.template.publish:
+                  id: heatpump
+                  state: ON
+        - if:
+            condition:
+              - binary_sensor.is_off: warmtepomp
+            then:
+              - switch.template.publish:
+                  id: heatpump
+                  state: OFF
+
+sensor:
+  - !include common/sensor/wifi_signal.yaml
+  - !include common/sensor/uptime.yaml
+  - platform: dallas
+    address: 0xA73C01D607CB8928
+    name: ${devicename} temperature 1
+    accuracy_decimals: 1
+    id: temperature1
+  - platform: dallas
+    address: 0xA400000003DDA428
+    name: ${devicename} temperature 2
+    accuracy_decimals: 1
+    id: temperature2
+
+status_led:
+  pin:
+    number: GPIO13
+    inverted: yes
+
+switch:
+  - !include common/switch/restart.yaml
+  - platform: gpio
+    name: ${devicename} relay 1 #Pump
+    pin: GPIO12
+    id: relay1
+  - platform: gpio
+    name: ${devicename} relay 2 #Dosing system
+    pin: GPIO5
+    id: relay2
+  - platform: gpio
+    name: ${devicename} relay 3 #Solar valve closed
+    pin: GPIO4
+    id: relay3
+    interlock: relay4
+    interlock_wait_time: 1s
+    restore_mode: always_off
+    internal: true
+  - platform: gpio
+    name: ${devicename} relay 4 #Solar valve open
+    pin: GPIO15
+    id: relay4
+    interlock: relay3
+    interlock_wait_time: 1s
+    restore_mode: always_off
+    internal: true
+  - platform: template
+    name: Solar
+    id: solar
+    turn_on_action:
+      - then:
+        - script.execute: solar_on
+    turn_off_action:
+      - then:
+        - script.execute: solar_off
+  - platform: template
+    name: Heatpump
+    id: heatpump
+    turn_on_action:
+      - then:
+        - homeassistant.service:
+            service: homeassistant.turn_on
+            data: {"entity_id": "switch.esp_warmtepomp_relay"}
+        #- switch.template.publish:
+        #    id: heatpump
+        #    state: ON
+    turn_off_action:
+      - then:
+        - homeassistant.service:
+            service: homeassistant.turn_off
+            data: {"entity_id": "switch.esp_warmtepomp_relay"}
+        #- switch.template.publish:
+        #    id: heatpump
+        #    state: OFF
+
+script:
+  - id: solar_on
+    # relay4 = solar position
+    mode: single
+    then:
+    - switch.template.publish:
+        id: solar
+        state: ON
+    - switch.turn_off: relay3
+    - delay: 1s #Avoid motor damage
+    - switch.turn_on: relay4
+    - delay: 30s
+    - switch.turn_off: relay4
+  - id: solar_off
+    # relay3 = no solar position
+    mode: single
+    then:
+    - switch.template.publish:
+        id: solar
+        state: OFF
+    - switch.turn_off: relay4
+    - delay: 1s #Avoid motor damage
+    - switch.turn_on: relay3
+    - delay: 30s
+    - switch.turn_off: relay3
+
+time:
+  - !include common/time/sync.yaml
+
+font:
+  - !include common/font/arial14.yaml
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    #external_vcc: true
+    address: 0x3c
+    lambda: |-
+      it.strftime(0, 0, id(arial14), "Zwembad %H:%M", id(ha_time).now());
+      it.printf(0, 15, id(arial14), "Pump: %s", id(relay1).state ? "ON" : "OFF");
+      if (id(temperature1).has_state()) {
+        it.printf(0, 30, id(arial14), "Water: %.1f°C", id(temperature1).state);
+      }
+      if (id(temperature2).has_state()) {
+        it.printf(0, 45, id(arial14), "Solar: %.1f°C  %s", id(temperature2).state, id(solar).state ? "ON" : "OFF");
+      }
